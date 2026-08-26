@@ -1,0 +1,55 @@
+{
+  "name": "strapi-plugin-import-export-v5",
+  "version": "1.0.0",
+  "description": "Universal Content Import & Export Plugin for Strapi 5",
+  "strapi": {
+    "name": "import-export",
+    "displayName": "Import / Export",
+    "description": "Universal Content Import & Export plugin for Strapi 5",
+    "kind": "plugin"
+  },
+  "main": "./strapi-server.js",
+  "browser": "./strapi-admin.js",
+  "exports": {
+    "./strapi-admin": {
+      "source": "./admin/src/index.js",
+      "default": "./admin/src/index.js"
+    },
+    "./strapi-server": {
+      "source": "./server/index.js",
+      "default": "./server/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "admin",
+    "server",
+    "strapi-admin.js",
+    "strapi-server.js",
+    "package.json",
+    "README.md"
+  ],
+  "keywords": [
+    "strapi",
+    "strapi-plugin",
+    "import",
+    "export",
+    "strapi5",
+    "cms",
+    "content"
+  ],
+  "peerDependencies": {
+    "@strapi/strapi": "^5.0.0"
+  },
+  "dependencies": {},
+  "author": "Community",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_USERNAME/strapi-custom-plugin-v5.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YOUR_USERNAME/strapi-custom-plugin-v5/issues"
+  },
+  "homepage": "https://github.com/YOUR_USERNAME/strapi-custom-plugin-v5#readme"
+}
