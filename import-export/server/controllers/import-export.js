@@ -36,10 +36,14 @@ module.exports = ({ strapi }) => ({
       if (!contentType) {
         return ctx.badRequest('contentType parameter is required.');
       }
+      const requestOrigin =
+        ctx.request.origin ||
+        (ctx.request.protocol && ctx.request.host ? `${ctx.request.protocol}://${ctx.request.host}` : null);
+
       const result = await strapi
         .plugin('import-export')
         .service('export')
-        .exportContent(contentType, { selectionMode, selectedDocumentIds, start, limit, fromDate, toDate });
+        .exportContent(contentType, { selectionMode, selectedDocumentIds, start, limit, fromDate, toDate, requestOrigin });
       ctx.body = result;
     } catch (err) {
       console.error('--- EXPORT CONTROLLER ERROR ---', err);
@@ -65,14 +69,14 @@ module.exports = ({ strapi }) => ({
 
   async importData(ctx) {
     try {
-      const { data, matchingKey, publicationStateMode } = ctx.request.body;
+      const { data, matchingKey, publicationStateMode, mediaBaseUrl } = ctx.request.body;
       if (!data) {
         return ctx.badRequest('data payload is required.');
       }
       const result = await strapi
         .plugin('import-export')
         .service('import')
-        .importContent(data, { matchingKey, publicationStateMode });
+        .importContent(data, { matchingKey, publicationStateMode, mediaBaseUrl });
       ctx.body = { data: result };
     } catch (err) {
       ctx.badRequest(err.message);
