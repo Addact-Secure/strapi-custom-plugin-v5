@@ -82,19 +82,13 @@ module.exports = ({ strapi }) => ({
           populate[attrName] = true;
         }
       } else if (attr.type === 'component') {
-        const compSchema = strapi.components[attr.component];
         populate[attrName] = {
-          populate: this.buildPopulateSchema(compSchema, currentDepth + 1, maxDepth),
+          populate: '*',
         };
       } else if (attr.type === 'dynamiczone') {
-        const dzPopulate = {};
-        (attr.components || []).forEach((compName) => {
-          const compSchema = strapi.components[compName];
-          dzPopulate[compName] = {
-            populate: this.buildPopulateSchema(compSchema, currentDepth + 1, maxDepth),
-          };
-        });
-        populate[attrName] = { on: dzPopulate };
+        populate[attrName] = {
+          populate: '*',
+        };
       }
     });
 
@@ -104,11 +98,11 @@ module.exports = ({ strapi }) => ({
   /**
    * Recursively sanitize entry data before exporting
    */
-  sanitizeEntry(data, schema) {
+  sanitizeEntry(data, schema, requestOrigin) {
     if (!data || typeof data !== 'object') return data;
 
     if (Array.isArray(data)) {
-      return data.map((item) => this.sanitizeEntry(item, schema));
+      return data.map((item) => this.sanitizeEntry(item, schema, requestOrigin));
     }
 
     const result = {};
@@ -132,7 +126,7 @@ module.exports = ({ strapi }) => ({
       if (!attr) {
         // Dynamic component or raw key
         if (typeof val === 'object' && val !== null) {
-          result[key] = this.sanitizeEntry(val, null);
+          result[key] = this.sanitizeEntry(val, null, requestOrigin);
         } else {
           result[key] = val;
         }
@@ -141,9 +135,9 @@ module.exports = ({ strapi }) => ({
 
       if (attr.type === 'media') {
         if (Array.isArray(val)) {
-          result[key] = val.map((mediaItem) => this.formatMedia(mediaItem));
+          result[key] = val.map((mediaItem) => this.formatMedia(mediaItem, requestOrigin));
         } else if (val && typeof val === 'object') {
-          result[key] = this.formatMedia(val);
+          result[key] = this.formatMedia(val, requestOrigin);
         } else {
           result[key] = null;
         }
@@ -157,12 +151,12 @@ module.exports = ({ strapi }) => ({
         }
       } else if (attr.type === 'component') {
         const compSchema = strapi.components[attr.component];
-        result[key] = this.sanitizeEntry(val, compSchema);
+        result[key] = this.sanitizeEntry(val, compSchema, requestOrigin);
       } else if (attr.type === 'dynamiczone') {
         if (Array.isArray(val)) {
           result[key] = val.map((dzItem) => {
             const compSchema = strapi.components[dzItem.__component];
-            return this.sanitizeEntry(dzItem, compSchema);
+            return this.sanitizeEntry(dzItem, compSchema, requestOrigin);
           });
         } else {
           result[key] = [];
@@ -175,14 +169,28 @@ module.exports = ({ strapi }) => ({
     return result;
   },
 
-  formatMedia(media) {
+  formatMedia(media, requestOrigin) {
     if (!media || typeof media !== 'object') return null;
+
+    let mediaUrl = media.url || '';
+    if (mediaUrl && mediaUrl.startsWith('/')) {
+      const serverUrl =
+        requestOrigin ||
+        strapi.config.get('server.url') ||
+        process.env.PUBLIC_URL ||
+        process.env.STRAPI_ADMIN_BACKEND_URL;
+      if (serverUrl && (serverUrl.startsWith('http://') || serverUrl.startsWith('https://'))) {
+        const baseUrl = serverUrl.replace(/\/+$/, '');
+        mediaUrl = `${baseUrl}${mediaUrl}`;
+      }
+    }
+
     return {
       name: media.name,
       hash: media.hash,
       ext: media.ext,
       mime: media.mime,
-      url: media.url,
+      url: mediaUrl,
       caption: media.caption || '',
       alternativeText: media.alternativeText || '',
     };
@@ -199,7 +207,7 @@ module.exports = ({ strapi }) => ({
     return result;
   },
 
-  async exportContent(uid, { selectionMode = 'all', selectedDocumentIds = [], start = 0, limit = 1000, fromDate, toDate } = {}) {
+  async exportContent(uid, { selectionMode = 'all', selectedDocumentIds = [], start = 0, limit = 1000, fromDate, toDate, requestOrigin } = {}) {
     const schema = strapi.contentTypes[uid];
     if (!schema) {
       throw new Error(`Content type ${uid} not found`);
@@ -245,7 +253,7 @@ module.exports = ({ strapi }) => ({
       });
     }
 
-    const sanitizedData = rawEntries.map((entry) => this.sanitizeEntry(entry, schema));
+    const sanitizedData = rawEntries.map((entry) => this.sanitizeEntry(entry, schema, requestOrigin));
 
     return {
       version: '1.0',
