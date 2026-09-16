@@ -97,6 +97,7 @@ const HomePage = () => {
   const [uploadedFile, setUploadedFile] = useState(null);
   const [matchingKey, setMatchingKey] = useState('auto');
   const [publicationStateMode, setPublicationStateMode] = useState('preserve');
+  const [mediaBaseUrl, setMediaBaseUrl] = useState('');
 
   
   const [previewing, setPreviewing] = useState(false);
@@ -361,6 +362,7 @@ const HomePage = () => {
             data: chunkPayload,
             matchingKey,
             publicationStateMode,
+            mediaBaseUrl,
           });
           const chunkResult = response.data?.data;
           results.push(chunkResult);
@@ -386,6 +388,7 @@ const HomePage = () => {
           data: payload,
           matchingKey,
           publicationStateMode,
+          mediaBaseUrl,
         });
         finalResult = response.data?.data;
         

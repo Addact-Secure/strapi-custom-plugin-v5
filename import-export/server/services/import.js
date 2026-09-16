@@ -48,6 +48,17 @@ const http = require('http');
 const https = require('https');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
+
+function isMediaObject(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+  return Boolean(obj.url && (obj.hash || obj.mime || obj.ext || obj.name));
+}
+
+function isMediaArray(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return false;
+  return arr.every((item) => isMediaObject(item));
+}
 
 module.exports = ({ strapi }) => ({
   async findMatchedEntry(entry, schema, contentTypeUid, matchingKey) {
@@ -148,7 +159,7 @@ module.exports = ({ strapi }) => ({
     return null;
   },
 
-  async importContent(payload, { matchingKey = 'auto', publicationStateMode = 'preserve' } = {}) {
+  async importContent(payload, { matchingKey = 'auto', publicationStateMode = 'preserve', mediaBaseUrl = '' } = {}) {
     if (!payload || typeof payload !== 'object') {
       throw new Error('Invalid JSON payload provided.');
     }
@@ -174,7 +185,7 @@ module.exports = ({ strapi }) => ({
       const entryIdentifier = entry.Slug || entry.slug || entry.documentId || entry.title || entry.name || `Entry #${i + 1}`;
 
       try {
-        const processedData = await this.processEntryData(entry, schema, entryIdentifier, warnings);
+        const processedData = await this.processEntryData(entry, schema, entryIdentifier, warnings, mediaBaseUrl);
         let matchedEntry = null;
 
         if (schema.kind === 'singleType') {
@@ -245,7 +256,7 @@ module.exports = ({ strapi }) => ({
     };
   },
 
-  async processEntryData(data, schema, entryIdentifier, warnings) {
+  async processEntryData(data, schema, entryIdentifier, warnings, mediaBaseUrl = '') {
     if (!data || typeof data !== 'object') return data;
 
     const attributes = schema ? schema.attributes || {} : {};
@@ -262,8 +273,10 @@ module.exports = ({ strapi }) => ({
 
       if (!attr) {
         // Component or custom key without formal attribute
-        if (typeof val === 'object' && val !== null) {
-          result[key] = await this.processEntryData(val, null, entryIdentifier, warnings);
+        if (isMediaObject(val) || isMediaArray(val)) {
+          result[key] = await this.resolveMedia(val, entryIdentifier, warnings, mediaBaseUrl);
+        } else if (typeof val === 'object' && val !== null) {
+          result[key] = await this.processEntryData(val, null, entryIdentifier, warnings, mediaBaseUrl);
         } else {
           result[key] = val;
         }
@@ -271,7 +284,7 @@ module.exports = ({ strapi }) => ({
       }
 
       if (attr.type === 'media') {
-        result[key] = await this.resolveMedia(val, entryIdentifier, warnings);
+        result[key] = await this.resolveMedia(val, entryIdentifier, warnings, mediaBaseUrl);
       } else if (attr.type === 'relation') {
         result[key] = await this.resolveRelation(val, attr, entryIdentifier, warnings);
       } else if (attr.type === 'component') {
@@ -279,11 +292,11 @@ module.exports = ({ strapi }) => ({
         if (Array.isArray(val)) {
           result[key] = [];
           for (const item of val) {
-            const processedItem = await this.processEntryData(item, compSchema, entryIdentifier, warnings);
+            const processedItem = await this.processEntryData(item, compSchema, entryIdentifier, warnings, mediaBaseUrl);
             result[key].push(processedItem);
           }
         } else if (val && typeof val === 'object') {
-          result[key] = await this.processEntryData(val, compSchema, entryIdentifier, warnings);
+          result[key] = await this.processEntryData(val, compSchema, entryIdentifier, warnings, mediaBaseUrl);
         } else {
           result[key] = null;
         }
@@ -293,7 +306,7 @@ module.exports = ({ strapi }) => ({
           for (const dzItem of val) {
             if (dzItem && dzItem.__component) {
               const compSchema = strapi.components[dzItem.__component];
-              const processedDzItem = await this.processEntryData(dzItem, compSchema, entryIdentifier, warnings);
+              const processedDzItem = await this.processEntryData(dzItem, compSchema, entryIdentifier, warnings, mediaBaseUrl);
               processedDzItem.__component = dzItem.__component;
               result[key].push(processedDzItem);
             }
@@ -309,7 +322,7 @@ module.exports = ({ strapi }) => ({
     return result;
   },
 
-  async resolveMedia(val, entryIdentifier, warnings) {
+  async resolveMedia(val, entryIdentifier, warnings, mediaBaseUrl = '') {
     if (!val) return null;
     const items = Array.isArray(val) ? val : [val];
     const resolvedIds = [];
@@ -318,37 +331,81 @@ module.exports = ({ strapi }) => ({
       if (!item || typeof item !== 'object') continue;
 
       // 1. Search existing media in target Upload Library by hash / url / name
-      const filters = {};
-      if (item.hash) filters.hash = item.hash;
-      else if (item.url) filters.url = item.url;
-      else if (item.name) filters.name = item.name;
+      const orFilters = [];
+      if (item.hash) orFilters.push({ hash: item.hash });
+      if (item.name) orFilters.push({ name: item.name });
+      if (item.url) orFilters.push({ url: item.url });
 
-      const existingFiles = await strapi.documents('plugin::upload.file').findMany({
-        filters,
-        limit: 1,
-      });
+      if (orFilters.length > 0) {
+        const existingFiles = await strapi.documents('plugin::upload.file').findMany({
+          filters: { $or: orFilters },
+          limit: 1,
+        });
 
-      if (existingFiles && existingFiles.length > 0) {
-        resolvedIds.push(existingFiles[0].id || existingFiles[0].documentId);
-        continue;
+        if (existingFiles && existingFiles.length > 0) {
+          const mediaId = existingFiles[0].id || existingFiles[0].documentId;
+          console.log(`[Import Plugin] Matched existing media file in target DB: id=${mediaId}`, existingFiles[0]);
+          resolvedIds.push(mediaId);
+          continue;
+        }
       }
 
-      // 2. If remote media URL present (http / https), attempt to download and upload into Strapi Media Library
-      if (item.url && (item.url.startsWith('http://') || item.url.startsWith('https://'))) {
+      // 2. Determine target media download URL
+      let targetUrl = item.url || '';
+      if (targetUrl && targetUrl.startsWith('/')) {
+        const base = mediaBaseUrl || strapi.config.get('server.url') || process.env.PUBLIC_URL || '';
+        if (base && (base.startsWith('http://') || base.startsWith('https://'))) {
+          const cleanBase = base.replace(/\/+$/, '');
+          targetUrl = `${cleanBase}${targetUrl}`;
+        }
+      }
+
+      // 3. Register or Download Media if remote URL present (http / https) or relative
+      if (targetUrl) {
+        // Step A: Register Azure / CDN media file directly in target DB plugin::upload.file table
         try {
-          const uploadedFile = await this.downloadAndUploadMedia(item);
-          if (uploadedFile) {
-            resolvedIds.push(uploadedFile.id || uploadedFile.documentId);
+          const registeredFile = await strapi.db.query('plugin::upload.file').create({
+            data: {
+              name: item.name || path.basename((targetUrl || 'file.png').split('?')[0]) || 'file.png',
+              hash: item.hash || path.basename((targetUrl || 'file.png').split('?')[0]),
+              ext: item.ext || path.extname((targetUrl || 'file.png').split('?')[0]) || '.png',
+              mime: item.mime || 'image/png',
+              size: item.size || 0,
+              url: targetUrl || item.url || '',
+              caption: item.caption || '',
+              alternativeText: item.alternativeText || '',
+              provider: item.provider || 'azure',
+            },
+          });
+
+          console.log('[Import Plugin] Direct DB registration result:', registeredFile);
+
+          if (registeredFile) {
+            const finalId = registeredFile.id || registeredFile.documentId;
+            resolvedIds.push(finalId);
             continue;
           }
-        } catch (downloadErr) {
-          warnings.push(
-            `Entry '${entryIdentifier}': Could not download media asset '${item.name || item.url}': ${downloadErr.message}`
-          );
+        } catch (regErr) {
+          console.error('[Import Plugin] Direct DB registration failed:', regErr.message);
+        }
+
+        // Step B: Download & Upload Media if direct DB registration was not used
+        if (targetUrl.startsWith('http://') || targetUrl.startsWith('https://')) {
+          try {
+            const uploadedFile = await this.downloadAndUploadMedia(item, targetUrl);
+            if (uploadedFile) {
+              resolvedIds.push(uploadedFile.documentId || uploadedFile.id);
+              continue;
+            }
+          } catch (downloadErr) {
+            warnings.push(
+              `Entry '${entryIdentifier}': Could not download media asset '${item.name || targetUrl}': ${downloadErr.message}`
+            );
+          }
         }
       } else {
         warnings.push(
-          `Entry '${entryIdentifier}': Media asset '${item.name || item.hash}' not found in target environment.`
+          `Entry '${entryIdentifier}': Media asset '${item.name || item.hash || item.url}' not found in target environment and no valid media host URL provided.`
         );
       }
     }
@@ -356,24 +413,43 @@ module.exports = ({ strapi }) => ({
     return Array.isArray(val) ? resolvedIds : resolvedIds[0] || null;
   },
 
-  async downloadAndUploadMedia(mediaInfo) {
+  async downloadAndUploadMedia(mediaInfo, targetUrl) {
+    const downloadUrl = targetUrl || mediaInfo.url;
     return new Promise((resolve, reject) => {
-      const client = mediaInfo.url.startsWith('https://') ? https : http;
+      const client = downloadUrl.startsWith('https://') ? https : http;
+      const os = require('os');
       client
-        .get(mediaInfo.url, (res) => {
+        .get(downloadUrl, (res) => {
           if (res.statusCode !== 200) {
-            return reject(new Error(`HTTP status ${res.statusCode}`));
+            return reject(new Error(`HTTP status ${res.statusCode} downloading ${downloadUrl}`));
           }
 
           const chunks = [];
           res.on('data', (chunk) => chunks.push(chunk));
           res.on('end', async () => {
+            let tmpPath = null;
             try {
               const buffer = Buffer.concat(chunks);
-              const fileName = mediaInfo.name || path.basename(mediaInfo.url) || 'file.png';
+              const fileName = mediaInfo.name || path.basename(downloadUrl.split('?')[0]) || 'file.png';
               const fileMime = mediaInfo.mime || 'image/png';
+              const tmpDir = os.tmpdir();
+              tmpPath = path.join(tmpDir, `strapi_import_${Date.now()}_${Math.random().toString(36).substring(7)}_${fileName}`);
+
+              fs.writeFileSync(tmpPath, buffer);
 
               const uploadService = strapi.plugin('upload').service('upload');
+              const fileObj = {
+                path: tmpPath,
+                filepath: tmpPath,
+                tmpPath: tmpPath,
+                name: fileName,
+                originalFilename: fileName,
+                type: fileMime,
+                mimetype: fileMime,
+                size: buffer.length,
+                buffer: buffer,
+              };
+
               const uploadedFiles = await uploadService.upload({
                 data: {
                   fileInfo: {
@@ -382,18 +458,19 @@ module.exports = ({ strapi }) => ({
                     alternativeText: mediaInfo.alternativeText || '',
                   },
                 },
-                files: {
-                  path: buffer,
-                  name: fileName,
-                  type: fileMime,
-                  size: buffer.length,
-                  buffer,
-                },
+                files: fileObj,
               });
+
+              if (fs.existsSync(tmpPath)) {
+                try { fs.unlinkSync(tmpPath); } catch (e) {}
+              }
 
               const uploaded = Array.isArray(uploadedFiles) ? uploadedFiles[0] : uploadedFiles;
               resolve(uploaded);
             } catch (err) {
+              if (tmpPath && fs.existsSync(tmpPath)) {
+                try { fs.unlinkSync(tmpPath); } catch (e) {}
+              }
               reject(err);
             }
           });
