@@ -1,6 +1,6 @@
 {
   "name": "strapi-plugin-import-export-v5",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Universal Content Import & Export Plugin for Strapi 5",
   "strapi": {
     "name": "import-export",
